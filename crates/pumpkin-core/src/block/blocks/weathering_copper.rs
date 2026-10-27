@@ -1,15 +1,25 @@
 use std::sync::Arc;
 
 use pumpkin_data::block_properties::{
-    ChestLikeProperties, ChestType, CopperBulbLikeProperties, CopperGolemStatueLikeProperties,
-    DoubleBlockHalf, EnumVariants, IronChainLikeProperties, LanternLikeProperties,
-    MangroveRootsLikeProperties, OakDoorLikeProperties, OakFenceLikeProperties,
-    OakTrapdoorLikeProperties, WhiteWoolSlabLikeProperties, WhiteWoolStairsLikeProperties,
+    ChestLikeProperties, ChestType, CopperBulbLikeProperties, CopperGolemPose,
+    CopperGolemStatueLikeProperties, DoubleBlockHalf, EnumVariants, IronChainLikeProperties,
+    LanternLikeProperties, LightningRodLikeProperties, MangroveRootsLikeProperties,
+    OakDoorLikeProperties, OakFenceLikeProperties, OakTrapdoorLikeProperties,
+    WhiteWoolSlabLikeProperties, WhiteWoolStairsLikeProperties,
 };
-use pumpkin_data::tag::Taggable;
+use pumpkin_data::data_component_impl::BlockStateImpl;
+use pumpkin_data::fluid::Fluid;
+use pumpkin_data::game_event::GameEvent;
+use pumpkin_data::item::Item;
+use pumpkin_data::item_stack::ItemStack;
+use pumpkin_data::sound::{Sound, SoundCategory};
+use pumpkin_data::tag::{self, Taggable};
 use pumpkin_data::{Block, BlockId, BlockState, BlockStateId, Mirror, Rotation};
+use pumpkin_macros::pumpkin_block_from_tag;
+use pumpkin_util::Hand;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
+use pumpkin_world::tick::TickPriority;
 use pumpkin_world::world::BlockFlags;
 
 use crate::block::blocks::chain::ChainBlock;
@@ -17,12 +27,15 @@ use crate::block::blocks::doors::DoorBlock;
 use crate::block::blocks::slabs::SlabBlock;
 use crate::block::blocks::stairs::StairBlock;
 use crate::block::blocks::trapdoor::TrapDoorBlock;
+use crate::block::entities::copper_golem_statue::CopperGolemStatueBlockEntity;
 use crate::block::registry::BlockActionResult;
 use crate::block::{
     BlockBehaviour, BlockMetadata, BrokenArgs, CanPlaceAtArgs, CanUpdateAtArgs,
     GetComparatorOutputArgs, GetStateForNeighborUpdateArgs, NormalUseArgs, OnNeighborUpdateArgs,
     OnPlaceArgs, OnStateReplacedArgs, PathComputationType, PlacedArgs, RandomTickArgs,
+    UseWithItemArgs,
 };
+use crate::entity::EntityBase;
 use crate::world::World;
 
 /// Base chance per random tick to attempt degradation (~5.69%).
@@ -220,6 +233,12 @@ const COPPER_PROGRESSIONS: &[(&Block, &Block, &Block, &Block)] = &[
         &Block::WEATHERED_COPPER_CHAIN,
         &Block::OXIDIZED_COPPER_CHAIN,
     ),
+    (
+        &Block::LIGHTNING_ROD,
+        &Block::EXPOSED_LIGHTNING_ROD,
+        &Block::WEATHERED_LIGHTNING_ROD,
+        &Block::OXIDIZED_LIGHTNING_ROD,
+    ),
 ];
 
 /// Returns the next oxidized block in sequence, or `None` if already oxidized or not a weathering copper block.
@@ -304,6 +323,7 @@ pub const fn get_chance_modifier(state: WeatherState) -> f32 {
 
 /// Converts a block state ID of `from_block` to the corresponding state ID of `to_block`, preserving all block properties.
 #[must_use]
+#[expect(clippy::too_many_lines)]
 pub fn with_properties_of(
     from_block: &Block,
     from_state_id: BlockStateId,
@@ -417,6 +437,16 @@ pub fn with_properties_of(
         || from_block == &Block::OXIDIZED_COPPER_CHAIN
     {
         let props = IronChainLikeProperties::from_state_id(from_state_id);
+        return props.to_state_id(to_block);
+    }
+
+    // 13. Lightning Rods
+    if from_block == &Block::LIGHTNING_ROD
+        || from_block == &Block::EXPOSED_LIGHTNING_ROD
+        || from_block == &Block::WEATHERED_LIGHTNING_ROD
+        || from_block == &Block::OXIDIZED_LIGHTNING_ROD
+    {
+        let props = LightningRodLikeProperties::from_state_id(from_state_id);
         return props.to_state_id(to_block);
     }
 
@@ -619,18 +649,6 @@ impl BlockMetadata for WeatheringCopperBlock {
             BlockId::EXPOSED_CHISELED_COPPER,
             BlockId::WEATHERED_CHISELED_COPPER,
             BlockId::OXIDIZED_CHISELED_COPPER,
-            BlockId::COPPER_BARS,
-            BlockId::EXPOSED_COPPER_BARS,
-            BlockId::WEATHERED_COPPER_BARS,
-            BlockId::OXIDIZED_COPPER_BARS,
-            BlockId::COPPER_LANTERN,
-            BlockId::EXPOSED_COPPER_LANTERN,
-            BlockId::WEATHERED_COPPER_LANTERN,
-            BlockId::OXIDIZED_COPPER_LANTERN,
-            BlockId::COPPER_GOLEM_STATUE,
-            BlockId::EXPOSED_COPPER_GOLEM_STATUE,
-            BlockId::WEATHERED_COPPER_GOLEM_STATUE,
-            BlockId::OXIDIZED_COPPER_GOLEM_STATUE,
         ]
         .into()
     }
@@ -640,26 +658,6 @@ impl BlockBehaviour for WeatheringCopperBlock {
     fn random_tick(&self, args: RandomTickArgs<'_>) {
         change_over_time(args.world, args.position, args.block);
     }
-
-    /// Only statues carry a pose, every other copper block here reads nothing.
-    fn get_comparator_output(&self, args: GetComparatorOutputArgs<'_>) -> Option<u8> {
-        if !is_copper_golem_statue(args.block.id) {
-            return None;
-        }
-        let props = CopperGolemStatueLikeProperties::from_state_id(args.state.id);
-        // Vanilla reads the pose ordinal, one-based.
-        Some(props.copper_golem_pose.to_index() as u8 + 1)
-    }
-}
-
-const fn is_copper_golem_statue(id: BlockId) -> bool {
-    matches!(
-        id,
-        BlockId::COPPER_GOLEM_STATUE
-            | BlockId::EXPOSED_COPPER_GOLEM_STATUE
-            | BlockId::WEATHERED_COPPER_GOLEM_STATUE
-            | BlockId::OXIDIZED_COPPER_GOLEM_STATUE
-    )
 }
 
 /// Weathering copper chain blocks.
@@ -705,6 +703,13 @@ impl BlockMetadata for WeatheringCopperChainBlock {
 impl BlockBehaviour for WeatheringCopperChainBlock {
     fn on_place(&self, args: OnPlaceArgs<'_>) -> BlockStateId {
         ChainBlock.on_place(args)
+    }
+
+    fn get_state_for_neighbor_update(
+        &self,
+        args: GetStateForNeighborUpdateArgs<'_>,
+    ) -> BlockStateId {
+        ChainBlock.get_state_for_neighbor_update(args)
     }
 
     fn random_tick(&self, args: RandomTickArgs<'_>) {
@@ -759,6 +764,13 @@ impl BlockMetadata for WeatheringCopperStairBlock {
 impl BlockBehaviour for WeatheringCopperStairBlock {
     fn on_place(&self, args: OnPlaceArgs<'_>) -> BlockStateId {
         StairBlock.on_place(args)
+    }
+
+    fn get_state_for_neighbor_update(
+        &self,
+        args: GetStateForNeighborUpdateArgs<'_>,
+    ) -> BlockStateId {
+        StairBlock.get_state_for_neighbor_update(args)
     }
 
     fn on_neighbor_update(&self, args: OnNeighborUpdateArgs<'_>) {
@@ -832,6 +844,13 @@ impl BlockBehaviour for WeatheringCopperTrapDoorBlock {
         TrapDoorBlock.on_place(args)
     }
 
+    fn get_state_for_neighbor_update(
+        &self,
+        args: GetStateForNeighborUpdateArgs<'_>,
+    ) -> BlockStateId {
+        TrapDoorBlock.get_state_for_neighbor_update(args)
+    }
+
     fn normal_use(&self, args: NormalUseArgs<'_>) -> BlockActionResult {
         TrapDoorBlock.normal_use(args)
     }
@@ -892,6 +911,13 @@ impl BlockMetadata for WeatheringCopperSlabBlock {
 impl BlockBehaviour for WeatheringCopperSlabBlock {
     fn on_place(&self, args: OnPlaceArgs<'_>) -> BlockStateId {
         SlabBlock.on_place(args)
+    }
+
+    fn get_state_for_neighbor_update(
+        &self,
+        args: GetStateForNeighborUpdateArgs<'_>,
+    ) -> BlockStateId {
+        SlabBlock.get_state_for_neighbor_update(args)
     }
 
     fn can_update_at(&self, args: CanUpdateAtArgs<'_>) -> bool {
@@ -1031,6 +1057,10 @@ impl BlockMetadata for WeatheringCopperGrateBlock {
             BlockId::EXPOSED_COPPER_GRATE,
             BlockId::WEATHERED_COPPER_GRATE,
             BlockId::OXIDIZED_COPPER_GRATE,
+            BlockId::WAXED_COPPER_GRATE,
+            BlockId::WAXED_EXPOSED_COPPER_GRATE,
+            BlockId::WAXED_WEATHERED_COPPER_GRATE,
+            BlockId::WAXED_OXIDIZED_COPPER_GRATE,
         ]
         .into()
     }
@@ -1043,7 +1073,205 @@ impl BlockBehaviour for WeatheringCopperGrateBlock {
         props.to_state_id(args.block)
     }
 
+    fn get_state_for_neighbor_update(
+        &self,
+        args: GetStateForNeighborUpdateArgs<'_>,
+    ) -> BlockStateId {
+        let props = MangroveRootsLikeProperties::from_state_id(args.state_id);
+        if props.waterlogged {
+            args.world.schedule_fluid_tick(
+                &Fluid::WATER,
+                *args.position,
+                Fluid::WATER.flow_speed as u8,
+                TickPriority::Normal,
+            );
+        }
+        args.state_id
+    }
+
     fn random_tick(&self, args: RandomTickArgs<'_>) {
         change_over_time(args.world, args.position, args.block);
+    }
+}
+
+/// Copper golem statue blocks (unwaxed and waxed).
+#[pumpkin_block_from_tag("minecraft:copper_golem_statues")]
+pub struct CopperGolemStatueBlock;
+
+impl ChangeOverTimeBlock<WeatherState> for CopperGolemStatueBlock {
+    fn get_age(&self, block: &Block) -> Option<WeatherState> {
+        get_weather_state(block)
+    }
+
+    fn get_chance_modifier(&self, age: WeatherState) -> f32 {
+        get_chance_modifier(age)
+    }
+
+    fn get_next(&self, block: &Block) -> Option<&'static Block> {
+        get_next(block)
+    }
+
+    fn get_previous(&self, block: &Block) -> Option<&'static Block> {
+        get_previous(block)
+    }
+
+    fn get_first(&self, block: &Block) -> Option<&'static Block> {
+        get_first(block)
+    }
+}
+
+impl WeatheringCopper for CopperGolemStatueBlock {}
+
+impl CopperGolemStatueBlock {
+    const fn next_pose(pose: CopperGolemPose) -> CopperGolemPose {
+        match pose {
+            CopperGolemPose::Standing => CopperGolemPose::Sitting,
+            CopperGolemPose::Sitting => CopperGolemPose::Running,
+            CopperGolemPose::Running => CopperGolemPose::Star,
+            CopperGolemPose::Star => CopperGolemPose::Standing,
+        }
+    }
+
+    fn update_pose(world: &Arc<World>, block: &Block, pos: &BlockPos) {
+        let state_id = world.get_block_state_id(pos);
+        let mut props = CopperGolemStatueLikeProperties::from_state_id(state_id);
+        props.copper_golem_pose = Self::next_pose(props.copper_golem_pose);
+        world.play_block_sound(
+            Sound::EntityCopperGolemBecomeStatue,
+            SoundCategory::Blocks,
+            *pos,
+        );
+        world.set_block_state(pos, props.to_state_id(block), BlockFlags::NOTIFY_ALL);
+        world.update_neighbour_for_output_signal(pos, block);
+        world.emit_game_event(GameEvent::BlockChange.name(), pos.to_centered_f64());
+    }
+
+    /// The pose stored on a statue item by pick block.
+    fn pose_from_item(stack: &ItemStack) -> Option<CopperGolemPose> {
+        let component = stack.get_data_component::<BlockStateImpl>()?;
+        let (_, value) = component
+            .properties
+            .iter()
+            .find(|(name, _)| name == "copper_golem_pose")?;
+        (0..CopperGolemPose::variant_count())
+            .map(CopperGolemPose::from_index)
+            .find(|pose| pose.to_value() == value.as_ref())
+    }
+}
+
+impl BlockBehaviour for CopperGolemStatueBlock {
+    fn on_place(&self, args: OnPlaceArgs<'_>) -> BlockStateId {
+        let mut props = CopperGolemStatueLikeProperties::default(args.block);
+        props.facing = args.player.get_entity().get_horizontal_facing().opposite();
+        props.waterlogged = args.replacing.water_source();
+        if let Ok(hand) = Hand::from_packet_id(args.use_item_on.hand.0)
+            && let Some(pose) =
+                Self::pose_from_item(&args.player.inventory().get_stack_in_hand(hand))
+        {
+            props.copper_golem_pose = pose;
+        }
+        props.to_state_id(args.block)
+    }
+
+    fn placed(&self, args: PlacedArgs<'_>) {
+        if args.world.get_block_entity(args.position).is_none() {
+            args.world
+                .add_block_entity(Arc::new(CopperGolemStatueBlockEntity::new(*args.position)));
+        }
+    }
+
+    fn get_state_for_neighbor_update(
+        &self,
+        args: GetStateForNeighborUpdateArgs<'_>,
+    ) -> BlockStateId {
+        let props = CopperGolemStatueLikeProperties::from_state_id(args.state_id);
+        if props.waterlogged {
+            args.world.schedule_fluid_tick(
+                &Fluid::WATER,
+                *args.position,
+                Fluid::WATER.flow_speed as u8,
+                TickPriority::Normal,
+            );
+        }
+        args.state_id
+    }
+
+    fn use_with_item(&self, args: UseWithItemArgs<'_>) -> BlockActionResult {
+        if args.item_stack.item.has_tag(&tag::Item::MINECRAFT_AXES) {
+            if args.block != &Block::COPPER_GOLEM_STATUE {
+                return BlockActionResult::Pass;
+            }
+            let Some(block_entity) = args.world.get_block_entity(args.position) else {
+                return BlockActionResult::Pass;
+            };
+            let Some(statue) = block_entity
+                .as_any()
+                .downcast_ref::<CopperGolemStatueBlockEntity>()
+            else {
+                return BlockActionResult::Pass;
+            };
+            let state = args.world.get_block_state(args.position);
+            let golem = statue.remove_statue(args.world, state);
+            if !args.world.spawn_entity(golem.clone()) {
+                return BlockActionResult::Fail;
+            }
+            args.player.damage_item_in_slot(args.equipment_slot, 1);
+            golem.play_spawn_sound();
+            let replacement = if state.is_waterlogged() {
+                &Block::WATER
+            } else {
+                &Block::AIR
+            };
+            args.world.set_block_state(
+                args.position,
+                replacement.default_state.id,
+                BlockFlags::NOTIFY_ALL,
+            );
+            return BlockActionResult::Success;
+        }
+        if args.item_stack.item == &Item::HONEYCOMB && get_weather_state(args.block).is_some() {
+            return BlockActionResult::Pass;
+        }
+        BlockActionResult::PassToDefaultBlockAction
+    }
+
+    fn normal_use(&self, args: NormalUseArgs<'_>) -> BlockActionResult {
+        Self::update_pose(args.world, args.block, args.position);
+        BlockActionResult::Success
+    }
+
+    fn on_state_replaced(&self, args: OnStateReplacedArgs<'_>) {
+        args.world
+            .update_neighbour_for_output_signal(args.position, args.block);
+    }
+
+    fn get_comparator_output(&self, args: GetComparatorOutputArgs<'_>) -> Option<u8> {
+        let props = CopperGolemStatueLikeProperties::from_state_id(args.state.id);
+        Some(props.copper_golem_pose.to_index() as u8 + 1)
+    }
+
+    fn random_tick(&self, args: RandomTickArgs<'_>) {
+        change_over_time(args.world, args.position, args.block);
+    }
+
+    fn rotate(
+        &self,
+        block: &Block,
+        state_id: BlockStateId,
+        rotation: Rotation,
+    ) -> &'static BlockState {
+        let mut props = CopperGolemStatueLikeProperties::from_state_id(state_id);
+        props.facing = rotation.rotate_horizontal(props.facing);
+        BlockState::from_id(props.to_state_id(block))
+    }
+
+    fn mirror(&self, block: &Block, state_id: BlockStateId, mirror: Mirror) -> &'static BlockState {
+        let props = CopperGolemStatueLikeProperties::from_state_id(state_id);
+        let rotation = mirror.get_rotation_for_horizontal(props.facing);
+        self.rotate(block, state_id, rotation)
+    }
+
+    fn is_pathfindable(&self, _state: &BlockState, _computation_type: PathComputationType) -> bool {
+        false
     }
 }
